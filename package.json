@@ -7,7 +7,9 @@
     "dev:renderer": "vite",
     "dev:electron": "wait-on http://localhost:5173 && tsc -p tsconfig.electron.json && electron .",
     "build": "tsc -p tsconfig.electron.json && vite build",
-    "package": "npm run build && electron-builder"
+    "fix:quarantine": "xattr -dr com.apple.quarantine node_modules 2>/dev/null || true",
+    "postinstall": "npm run fix:quarantine",
+    "package": "npm run fix:quarantine && npm run build && electron-builder"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
