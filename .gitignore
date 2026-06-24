@@ -20,6 +20,7 @@ build/icon.iconset/
 *.kdbx
 
 # Local tool/editor state
+.codegraph/
 .claude/
 .vscode/
 .idea/

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, type Dispatch, type SetStateAction } from 'react'
+import { useState, useEffect, useRef, useMemo, type Dispatch, type SetStateAction, type WheelEvent } from 'react'
 import { EditorState, Compartment } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers, placeholder, highlightSpecialChars, drawSelection, rectangularSelection, crosshairCursor, type BlockInfo } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
@@ -41,7 +41,7 @@ type TableTabState = {
 }
 type Tab = 'data' | 'structure' | 'ddl' | 'query' | 'logParser' | 'jsonBeautify'
 type SortOrder = 'ASC' | 'DESC' | null
-type Filter = { column: string; op: string; value: string; logic?: 'AND' | 'OR'; group?: number; groupLogic?: 'AND' | 'OR' }
+type Filter = { column: string; op: string; value: string; logic?: 'AND' | 'OR'; group?: number; groupLogic?: 'AND' | 'OR'; enabled?: boolean }
 type TabItem = { id: string; type: 'db' | 'table'; db: string; table?: string; label: string }
 type VirtualScrollState = { scrollTop: number; clientHeight: number; direction: -1 | 0 | 1; speedRows: number }
 type VirtualRange = { startIndex: number; endIndex: number; topPadding: number; bottomPadding: number }
@@ -243,6 +243,7 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
   const tabTooltipTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null)
   const [tabDropTarget, setTabDropTarget] = useState<{ id: string; side: 'before' | 'after' } | null>(null)
+  const lastTabWheelAt = useRef(0)
   const [ddlPreviewVisible, setDdlPreviewVisible] = useState(false)
 
   const showToast = (message: string) => {
@@ -457,6 +458,26 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
     })
   }
 
+  const switchTableByWheel = (e: WheelEvent<HTMLDivElement>) => {
+    const tableTabs = tabs.filter(t => t.type === 'table' && t.table)
+    if (tableTabs.length < 2) return
+
+    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+    if (Math.abs(delta) < 8) return
+
+    e.preventDefault()
+    const now = Date.now()
+    if (now - lastTabWheelAt.current < 220) return
+    lastTabWheelAt.current = now
+
+    const currentIndex = tableTabs.findIndex(t => t.id === activeTabId)
+    const nextIndex = delta > 0
+      ? (currentIndex + 1 + tableTabs.length) % tableTabs.length
+      : (currentIndex - 1 + tableTabs.length) % tableTabs.length
+    const nextTab = tableTabs[currentIndex === -1 ? (delta > 0 ? 0 : tableTabs.length - 1) : nextIndex]
+    if (nextTab?.table) switchToTab(nextTab.id, nextTab.db, nextTab.table)
+  }
+
   const selectTable = (db: string, table: string) => {
     openTableTab(db, table)
   }
@@ -491,7 +512,7 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
 
     let filterSQL = ''
     const allFilters = overrideFilters ?? filters
-    const activeFilters = allFilters.filter(f => f.column && (f.op === 'IS NULL' || f.op === 'IS NOT NULL' || f.op === 'IS EMPTY' || f.op === 'IS NOT EMPTY' || f.value))
+    const activeFilters = allFilters.filter(f => f.enabled !== false && f.column && (f.op === 'IS NULL' || f.op === 'IS NOT NULL' || f.op === 'IS EMPTY' || f.op === 'IS NOT EMPTY' || f.value))
 
     const buildCond = (f: Filter): string => {
       const col = `\`${f.column}\``
@@ -2052,7 +2073,11 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0 relative">
         {/* Tab bar */}
-        <div className={`border-b ${border} ${bg2} flex items-center gap-1 px-2 py-1 overflow-x-auto flex-shrink-0 [&::-webkit-scrollbar]:h-1.5`} style={{ scrollbarWidth: 'thin' }}>
+        <div
+          onWheel={switchTableByWheel}
+          className={`border-b ${border} ${bg2} flex items-center gap-1 px-2 py-1 overflow-x-auto flex-shrink-0 [&::-webkit-scrollbar]:h-1.5`}
+          style={{ scrollbarWidth: 'thin' }}
+        >
           {tabs.map(tab => {
             const isActive = activeTabId === tab.id
             const fullLabel = tab.table
@@ -2231,8 +2256,18 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
                       setFilters(prev => { const n = [...prev]; n[i] = { ...n[i], ...patch }; return n })
                     }
                     const removeFilter = (i: number) => {
-                      setFilters(prev => prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev)
+                      setFilters(prev => prev.length > 1 ? prev.filter((_, idx) => idx !== i) : [{ column: '', op: '=', value: '', logic: 'AND' }])
                     }
+                    const filterToggle = (i: number, enabled: boolean) => (
+                      <label className="flex items-center" title={enabled ? '取消勾选后不参与筛选' : '勾选后参与筛选'}>
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={e => updateFilter(i, { enabled: e.target.checked })}
+                          className="accent-blue-600"
+                        />
+                      </label>
+                    )
 
                     const addButtons = (
                       <>
@@ -2278,8 +2313,10 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
                           if (seg.type === 'single') {
                             const f = filters[seg.index]
                             const i = seg.index
+                            const enabled = f.enabled !== false
                             return (
                               <div key={`s-${i}`} className="flex items-center gap-2">
+                                {filterToggle(i, enabled)}
                                 {showSegLogic && (
                                   <select value={f.logic ?? 'AND'} onChange={e => updateFilter(i, { logic: e.target.value as 'AND'|'OR' })} className={`w-20 ${inputCls}`}>
                                     <option value="AND">AND</option>
@@ -2313,7 +2350,9 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
                                   <input type="text" placeholder={f.op.includes('BETWEEN') ? '值1,值2' : f.op.includes('IN') ? '值1,值2,值3' : '值'} value={f.value} onChange={e => updateFilter(i, { value: e.target.value })} className={`w-1/2 ${inputCls}`} />
                                 )}
                                 {si === 0 && addButtons}
-                                {i > 0 && <button onClick={() => removeFilter(i)} className="px-2 py-1 text-red-500 text-sm">-</button>}
+                                {filters.length > 1 && (
+                                  <button onClick={() => removeFilter(i)} className="px-2 py-1 text-red-500 hover:text-red-600 text-sm font-semibold" title="删除条件">-</button>
+                                )}
                               </div>
                             )
                           } else {
@@ -2336,8 +2375,10 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
                                   </div>
                                   {seg.indices.map((fi, pos) => {
                                     const f = filters[fi]
+                                    const enabled = f.enabled !== false
                                     return (
                                       <div key={fi} className="flex items-center gap-2">
+                                        {filterToggle(fi, enabled)}
                                         {pos > 0 && (
                                           <select value={f.logic ?? 'AND'} onChange={e => updateFilter(fi, { logic: e.target.value as 'AND'|'OR' })} className={`w-20 ${inputCls}`}>
                                             <option value="AND">AND</option>
@@ -2376,7 +2417,8 @@ export default function MySQLPanel({ connection, theme, requestedDb, requestedTa
                                             onClick={() => {
                                               removeFilter(fi)
                                             }}
-                                            className="px-2 py-1 text-red-500 text-sm"
+                                            className="px-2 py-1 text-red-500 hover:text-red-600 text-sm font-semibold"
+                                            title="删除条件"
                                           >-</button>
                                         )}
                                       </div>
